@@ -7,6 +7,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, AnyHttpUrl, Field
 
+from database import db, create_document, get_documents  # type: ignore
+
 app = FastAPI(title="SwimRank Updater API")
 
 # CORS: allow all origins for sandbox/demo
@@ -53,6 +55,10 @@ def health():
 
 @app.post("/live-update", response_model=LiveUpdateResponse)
 def live_update(payload: LiveUpdateRequest):
+    """
+    Execute a live update.
+    NOTE: In this sandbox we simulate new results but we persist the run and rows in MongoDB if available.
+    """
     # Simulate a small, realistic set of updated rows
     events = [
         "50m Freestyle",
@@ -84,12 +90,76 @@ def live_update(payload: LiveUpdateRequest):
             delta=f"-{gain_ms/1000:.2f}s",
         ))
 
-    return LiveUpdateResponse(
+    response = LiveUpdateResponse(
         ok=True,
         message=f"{len(rows)} ligne(s) mises à jour dans '{payload.sheet_tab}'.",
         updated_count=len(rows),
         rows=rows,
     )
+
+    # Persist run + results if DB available
+    try:
+        if db is not None:
+            from schemas import Run, Result  # type: ignore
+            run_doc = Run(
+                athlete_url=payload.athlete_url,
+                sheet_url=payload.sheet_url,
+                sheet_tab=payload.sheet_tab,
+                ok=response.ok,
+                message=response.message,
+                updated_count=response.updated_count,
+            )
+            run_id = create_document("run", run_doc)
+            for r in rows:
+                res_doc = Result(
+                    run_id=run_id,
+                    row_number=r.row_number,
+                    event=r.event,
+                    date=r.date,
+                    old_time=r.old_time,
+                    new_time=r.new_time,
+                    delta=r.delta,
+                )
+                create_document("result", res_doc)
+    except Exception as e:
+        # If database is not configured, keep working without persistence
+        pass
+
+    return response
+
+
+@app.get("/runs")
+def list_runs(limit: int = 10):
+    """Return recent runs (most recent first) if DB is available."""
+    if db is None:
+        return {"ok": False, "message": "Database not configured", "runs": []}
+    try:
+        runs = get_documents("run", {}, limit=limit)
+        # Sort by created_at desc if available
+        runs.sort(key=lambda d: d.get("created_at", datetime.min), reverse=True)
+        # Transform ObjectId
+        for r in runs:
+            if "_id" in r:
+                r["id"] = str(r.pop("_id"))
+        return {"ok": True, "runs": runs}
+    except Exception as e:
+        return {"ok": False, "message": str(e), "runs": []}
+
+
+@app.get("/runs/{run_id}/rows")
+def get_run_rows(run_id: str):
+    """Return stored rows for a specific run if DB is available."""
+    if db is None:
+        return {"ok": False, "message": "Database not configured", "rows": []}
+    try:
+        from bson import ObjectId  # type: ignore
+        rows = get_documents("result", {"run_id": run_id})
+        for r in rows:
+            if "_id" in r:
+                r["id"] = str(r.pop("_id"))
+        return {"ok": True, "rows": rows}
+    except Exception as e:
+        return {"ok": False, "message": str(e), "rows": []}
 
 
 @app.get("/test")
@@ -105,7 +175,6 @@ def test_database():
     }
 
     try:
-        from database import db  # type: ignore
         if db is not None:
             response["database"] = "✅ Available"
             response["database_url"] = "✅ Set" if os.getenv("DATABASE_URL") else "❌ Not Set"
@@ -119,8 +188,6 @@ def test_database():
                 response["database"] = f"⚠️  Connected but Error: {str(e)[:50]}"
         else:
             response["database"] = "⚠️  Available but not initialized"
-    except ImportError:
-        response["database"] = "❌ Database module not found"
     except Exception as e:  # pragma: no cover
         response["database"] = f"❌ Error: {str(e)[:50]}"
 
