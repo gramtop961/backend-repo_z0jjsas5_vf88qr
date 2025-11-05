@@ -1,6 +1,8 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, AnyHttpUrl, ValidationError
+from datetime import datetime, timezone
 
 app = FastAPI()
 
@@ -12,13 +14,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+class LiveRunPayload(BaseModel):
+    athlete_url: AnyHttpUrl
+    sheet_url: AnyHttpUrl
+    sheet_tab: str
+
+
 @app.get("/")
 def read_root():
     return {"message": "Hello from FastAPI Backend!"}
 
+
 @app.get("/api/hello")
 def hello():
     return {"message": "Hello from the backend API!"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+
+
+@app.post("/live-run")
+def live_run(payload: LiveRunPayload):
+    # In a real implementation, you would:
+    # 1) Fetch latest results from Swimrankings using payload.athlete_url
+    # 2) Parse and compute PRs / best times
+    # 3) Write updates into Google Sheets at payload.sheet_url and tab payload.sheet_tab
+    # For now, we simulate a successful update with some metadata.
+    now = datetime.now(timezone.utc)
+    return {
+        "status": "success",
+        "message": "Feuille mise à jour avec les derniers meilleurs temps.",
+        "updated": True,
+        "count": 5,
+        "tab": payload.sheet_tab,
+        "at": now.isoformat(),
+    }
+
 
 @app.get("/test")
 def test_database():
